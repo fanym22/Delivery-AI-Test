@@ -19,7 +19,7 @@ import os
 import sys
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from pathlib import Path
@@ -52,18 +52,24 @@ def resolve_default_db_path() -> Path:
 class Record:
     """一条记账记录。
 
-    金额统一用两位小数字符串对应的 Decimal 序列化展示，并以 float 兼容存储在 JSON 中；
-    类型由 `type` 字段区分，展示/统计时再处理符号。
+    金额内部使用 Decimal（两位小数）保证统计精度；JSON 序列化时输出为 float，
+    与历史数据文件（amount 为数字）保持兼容。
     """
 
     date: str        # YYYY-MM-DD
     type: str        # income | expense
-    amount: float    # 正数
+    amount: Decimal  # 正数，固定两位小数
     category: str
     note: str
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "date": self.date,
+            "type": self.type,
+            "amount": float(self.amount),
+            "category": self.category,
+            "note": self.note,
+        }
 
     @staticmethod
     def from_dict(raw: dict[str, Any], *, index: int) -> "Record":
@@ -97,7 +103,7 @@ class Record:
         return Record(
             date=rec_date,
             type=rec_type,
-            amount=float(amount_dec),
+            amount=amount_dec,
             category=category,
             note=note,
         )
@@ -111,16 +117,19 @@ def load_records(path: Path) -> list[Record]:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
-        raise SystemExit(f"[错误] 数据文件损坏，无法解析 JSON：{path}\n  详情：{e}")
+        sys.stderr.write(f"[错误] 数据文件损坏，无法解析 JSON：{path}\n  详情：{e}\n")
+        raise SystemExit(2)
     if not isinstance(data, list):
-        raise SystemExit(f"[错误] 数据文件格式错误，顶层应为数组：{path}")
+        sys.stderr.write(f"[错误] 数据文件格式错误，顶层应为数组：{path}\n")
+        raise SystemExit(2)
 
     records: list[Record] = []
     for idx, item in enumerate(data, start=1):
         try:
             records.append(Record.from_dict(item, index=idx))
         except ValueError as e:
-            raise SystemExit(f"[错误] 数据文件记录非法：{path}\n  详情：{e}")
+            sys.stderr.write(f"[错误] 数据文件记录非法：{path}\n  详情：{e}\n")
+            raise SystemExit(2)
     return records
 
 
@@ -153,8 +162,8 @@ def save_records(path: Path, records: list[Record]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def parse_positive_amount(raw: str) -> float:
-    """解析金额，必须为正数；最多保留 2 位小数以贴近实际使用。"""
+def parse_positive_amount(raw: str) -> Decimal:
+    """解析金额，必须为正数；固定两位小数，返回 Decimal 以避免浮点累计误差。"""
     try:
         value = Decimal(raw)
     except (InvalidOperation, ValueError):
@@ -165,7 +174,7 @@ def parse_positive_amount(raw: str) -> float:
         value = value.quantize(DECIMAL_Q, rounding=ROUND_HALF_UP)
     except InvalidOperation:
         raise argparse.ArgumentTypeError(f"金额格式非法，最多保留两位小数，收到：{raw}")
-    return float(value)
+    return value
 
 
 def parse_date(raw: str) -> date:
@@ -234,14 +243,14 @@ def cmd_list(args: argparse.Namespace) -> int:
     filtered.sort(key=lambda r: (_parse_record_date(r), r.to_dict().get("note", "")), reverse=True)
 
     if not filtered:
-        print("（暂无符合条件的记录）")
+        print("暂无符合条件的记录")
         return 0
 
     header = f"{'date':<12}{'type':<10}{'amount':>12}  {'category':<14}note"
     print(header)
     print("-" * 72)
-    total_income = 0.0
-    total_expense = 0.0
+    total_income: Decimal = Decimal("0.00")
+    total_expense: Decimal = Decimal("0.00")
     for r in filtered:
         sign = "+" if r.type == "income" else "-"
         note_display = r.note or "-"
@@ -253,9 +262,10 @@ def cmd_list(args: argparse.Namespace) -> int:
             total_expense += r.amount
 
     print("-" * 72)
+    balance = total_income - total_expense
     print(
         f"共 {len(filtered)} 条  |  收入合计: +{total_income:.2f}  "
-        f"|  支出合计: -{total_expense:.2f}  |  结余: {total_income - total_expense:+.2f}"
+        f"|  支出合计: -{total_expense:.2f}  |  结余: {balance:+.2f}"
     )
     return 0
 
@@ -266,11 +276,11 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
     month_records = [r for r in records if _parse_record_date(r).year == year and _parse_record_date(r).month == month]
 
-    total_income = sum(r.amount for r in month_records if r.type == "income")
-    total_expense = sum(r.amount for r in month_records if r.type == "expense")
-    balance = total_income - total_expense
+    total_income: Decimal = sum((r.amount for r in month_records if r.type == "income"), Decimal("0.00"))
+    total_expense: Decimal = sum((r.amount for r in month_records if r.type == "expense"), Decimal("0.00"))
+    balance: Decimal = total_income - total_expense
 
-    expense_by_cat: dict[str, float] = defaultdict(float)
+    expense_by_cat: dict[str, Decimal] = defaultdict(lambda: Decimal("0.00"))
     for r in month_records:
         if r.type == "expense":
             expense_by_cat[r.category] += r.amount
@@ -287,7 +297,7 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
     print("\n支出分类占比：")
     for cat, amt in sorted(expense_by_cat.items(), key=lambda kv: kv[1], reverse=True):
-        pct = (amt / total_expense * 100) if total_expense > 0 else 0
+        pct = (amt / total_expense * Decimal("100")) if total_expense > 0 else Decimal("0")
         bar = "#" * max(int(round(pct / 2)), 1 if pct > 0 else 0)
         print(f"  {cat:<12} {amt:>8.2f}  {pct:5.1f}%  {bar}")
     return 0

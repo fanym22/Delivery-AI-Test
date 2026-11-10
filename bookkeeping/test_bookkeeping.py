@@ -72,6 +72,39 @@ class BookkeepingTests(unittest.TestCase):
         self.assertNotEqual(bad_file.returncode, 0)
         self.assertIn("数据文件记录非法", bad_file.stderr)
 
+    def test_defaults_and_backward_compat(self) -> None:
+        """空/空白分类回退默认 other；缺字段旧数据可兼容读取。"""
+        add1 = run("add", "100", "income", "-c", "   ", db_path=self.db)
+        self.assertEqual(add1.returncode, 0, add1.stderr)
+        list_out = run("list", db_path=self.db)
+        self.assertEqual(list_out.returncode, 0, list_out.stderr)
+        self.assertIn("other", list_out.stdout)
+
+        self.db.write_text(
+            json.dumps([{"date": "2026-09-30", "type": "expense", "amount": 12.3}]),
+            encoding="utf-8",
+        )
+        summary_out = run("summary", "-m", "2026-09", db_path=self.db)
+        self.assertEqual(summary_out.returncode, 0, summary_out.stderr)
+        self.assertIn("总支出：-12.30", summary_out.stdout)
+        self.assertIn("other", summary_out.stdout)
+
+    def test_env_variable_db_path(self) -> None:
+        """通过 BOOKKEEPING_FILE 环境变量指定账本路径。"""
+        import os
+        env = os.environ.copy()
+        env["BOOKKEEPING_FILE"] = str(self.db)
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "add", "1", "expense", "-n", "env-test", "-d", "2026-08-01"],
+            capture_output=True, text=True, check=False, env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r2 = subprocess.run(
+            [sys.executable, str(SCRIPT), "summary", "-m", "2026-08"],
+            capture_output=True, text=True, check=False, env=env,
+        )
+        self.assertIn("总支出：-1.00", r2.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
