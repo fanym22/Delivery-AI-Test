@@ -17,9 +17,11 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +29,18 @@ from typing import Any
 # 常量与默认配置
 # ---------------------------------------------------------------------------
 
-DEFAULT_DB_PATH = Path(os.environ.get("BOOKKEEPING_FILE", str(Path.home() / ".bookkeeping.json")))
 TYPES = ("income", "expense")
 DATE_FMT = "%Y-%m-%d"
 MONTH_FMT = "%Y-%m"
 DEFAULT_CATEGORY = "other"
+DEFAULT_DB_PATH = Path.home() / ".bookkeeping.json"
+DECIMAL_Q = Decimal("0.01")
+
+
+def resolve_default_db_path() -> Path:
+    """按需解析默认数据文件路径，优先使用运行时环境变量。"""
+    env_path = os.environ.get("BOOKKEEPING_FILE")
+    return Path(env_path).expanduser() if env_path else DEFAULT_DB_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +52,8 @@ DEFAULT_CATEGORY = "other"
 class Record:
     """一条记账记录。
 
-    金额统一用正数存储，类型由 `type` 字段区分，展示/统计时再处理符号。
+    金额统一用两位小数字符串对应的 Decimal 序列化展示，并以 float 兼容存储在 JSON 中；
+    类型由 `type` 字段区分，展示/统计时再处理符号。
     """
 
     date: str        # YYYY-MM-DD
@@ -56,20 +66,46 @@ class Record:
         return asdict(self)
 
     @staticmethod
-    def from_dict(raw: dict[str, Any]) -> "Record":
-        # 兼容字段缺失：回填默认值，避免读取老文件时报错。
+    def from_dict(raw: dict[str, Any], *, index: int) -> "Record":
+        if not isinstance(raw, dict):
+            raise ValueError(f"第 {index} 条记录不是对象")
+
+        missing = [key for key in ("date", "type", "amount") if key not in raw]
+        if missing:
+            raise ValueError(f"第 {index} 条记录缺少必填字段：{', '.join(missing)}")
+
+        rec_date = str(raw["date"])
+        try:
+            datetime.strptime(rec_date, DATE_FMT)
+        except ValueError as exc:
+            raise ValueError(f"第 {index} 条记录日期格式错误，应为 YYYY-MM-DD：{rec_date}") from exc
+
+        rec_type = str(raw["type"])
+        if rec_type not in TYPES:
+            raise ValueError(f"第 {index} 条记录类型错误，仅支持 income/expense：{rec_type}")
+
+        try:
+            amount_dec = Decimal(str(raw["amount"])).quantize(DECIMAL_Q, rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"第 {index} 条记录金额非法：{raw['amount']}") from exc
+        if amount_dec <= 0:
+            raise ValueError(f"第 {index} 条记录金额必须为正数：{raw['amount']}")
+
+        category = str(raw.get("category", DEFAULT_CATEGORY) or DEFAULT_CATEGORY).strip() or DEFAULT_CATEGORY
+        note = str(raw.get("note", "") or "")
+
         return Record(
-            date=str(raw["date"]),
-            type=str(raw["type"]),
-            amount=float(raw["amount"]),
-            category=str(raw.get("category", DEFAULT_CATEGORY)) or DEFAULT_CATEGORY,
-            note=str(raw.get("note", "") or ""),
+            date=rec_date,
+            type=rec_type,
+            amount=float(amount_dec),
+            category=category,
+            note=note,
         )
 
 
 def load_records(path: Path) -> list[Record]:
-    """读取 JSON 文件；不存在或内容为空时返回空列表。"""
-    if not path.exists():
+    """读取 JSON 文件；不存在时返回空列表；损坏或字段非法时直接报错。"""
+    if not path.exists() or path.stat().st_size == 0:
         return []
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -77,17 +113,39 @@ def load_records(path: Path) -> list[Record]:
     except json.JSONDecodeError as e:
         raise SystemExit(f"[错误] 数据文件损坏，无法解析 JSON：{path}\n  详情：{e}")
     if not isinstance(data, list):
-        raise SystemExit(f"[错误] 数据文件格式错误，应为数组：{path}")
-    return [Record.from_dict(item) for item in data]
+        raise SystemExit(f"[错误] 数据文件格式错误，顶层应为数组：{path}")
+
+    records: list[Record] = []
+    for idx, item in enumerate(data, start=1):
+        try:
+            records.append(Record.from_dict(item, index=idx))
+        except ValueError as e:
+            raise SystemExit(f"[错误] 数据文件记录非法：{path}\n  详情：{e}")
+    return records
 
 
 def save_records(path: Path, records: list[Record]) -> None:
     """原子写入：先写临时文件再替换，避免中途异常导致数据丢失。"""
+    path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump([r.to_dict() for r in records], f, ensure_ascii=False, indent=2)
-    tmp.replace(path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump([r.to_dict() for r in records], f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -98,13 +156,16 @@ def save_records(path: Path, records: list[Record]) -> None:
 def parse_positive_amount(raw: str) -> float:
     """解析金额，必须为正数；最多保留 2 位小数以贴近实际使用。"""
     try:
-        value = float(raw)
-    except ValueError:
+        value = Decimal(raw)
+    except (InvalidOperation, ValueError):
         raise argparse.ArgumentTypeError(f"金额必须是数字，收到：{raw}")
     if value <= 0:
         raise argparse.ArgumentTypeError(f"金额必须为正数，收到：{raw}")
-    # 四舍五入到 2 位小数，避免浮点误差导致统计偏差。
-    return round(value, 2)
+    try:
+        value = value.quantize(DECIMAL_Q, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        raise argparse.ArgumentTypeError(f"金额格式非法，最多保留两位小数，收到：{raw}")
+    return float(value)
 
 
 def parse_date(raw: str) -> date:
@@ -149,8 +210,12 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_record_date(rec: Record) -> date:
+    return datetime.strptime(rec.date, DATE_FMT).date()
+
+
 def _matches_filter(rec: Record, start: date | None, end: date | None, category: str | None) -> bool:
-    d = datetime.strptime(rec.date, DATE_FMT).date()
+    d = _parse_record_date(rec)
     if start and d < start:
         return False
     if end and d > end:
@@ -166,15 +231,12 @@ def cmd_list(args: argparse.Namespace) -> int:
         r for r in records
         if _matches_filter(r, args.start_date, args.end_date, args.category)
     ]
-    # 默认按日期倒序展示；同日期下按追加顺序（即数组顺序）即可。
-    filtered.sort(key=lambda r: r.date, reverse=True)
+    filtered.sort(key=lambda r: (_parse_record_date(r), r.to_dict().get("note", "")), reverse=True)
 
     if not filtered:
         print("（暂无符合条件的记录）")
         return 0
 
-    # 表头（使用英文标签保证等宽对齐）
-    # 列宽：date=12 type=10 amount=12(含符号) category=14 note=剩余
     header = f"{'date':<12}{'type':<10}{'amount':>12}  {'category':<14}note"
     print(header)
     print("-" * 72)
@@ -198,26 +260,16 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
-
-
 def cmd_summary(args: argparse.Namespace) -> int:
     records = load_records(args.file)
     year, month = args.month
 
-    month_records: list[Record] = []
-    for r in records:
-        try:
-            d = datetime.strptime(r.date, DATE_FMT).date()
-        except ValueError:
-            continue  # 异常数据跳过，不影响统计
-        if d.year == year and d.month == month:
-            month_records.append(r)
+    month_records = [r for r in records if _parse_record_date(r).year == year and _parse_record_date(r).month == month]
 
     total_income = sum(r.amount for r in month_records if r.type == "income")
     total_expense = sum(r.amount for r in month_records if r.type == "expense")
     balance = total_income - total_expense
 
-    # 仅按支出做分类占比，收入不占支出的比例分母。
     expense_by_cat: dict[str, float] = defaultdict(float)
     for r in month_records:
         if r.type == "expense":
@@ -234,10 +286,9 @@ def cmd_summary(args: argparse.Namespace) -> int:
         return 0
 
     print("\n支出分类占比：")
-    # 按金额从高到低排序，方便阅读。
     for cat, amt in sorted(expense_by_cat.items(), key=lambda kv: kv[1], reverse=True):
         pct = (amt / total_expense * 100) if total_expense > 0 else 0
-        bar = "#" * int(round(pct / 2))  # 简单的可视化条，每格约 2%
+        bar = "#" * max(int(round(pct / 2)), 1 if pct > 0 else 0)
         print(f"  {cat:<12} {amt:>8.2f}  {pct:5.1f}%  {bar}")
     return 0
 
@@ -255,20 +306,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--file",
         type=Path,
-        default=DEFAULT_DB_PATH,
+        default=None,
         help=f"数据文件路径，默认 {DEFAULT_DB_PATH}（也可用 BOOKKEEPING_FILE 环境变量覆盖）",
     )
 
     sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
-    # add
     p_add = sub.add_parser("add", help="记一笔收入/支出")
     p_add.add_argument("amount", type=parse_positive_amount, help="金额（必须为正数）")
-    p_add.add_argument(
-        "type",
-        choices=TYPES,
-        help="类型：income=收入，expense=支出",
-    )
+    p_add.add_argument("type", choices=TYPES, help="类型：income=收入，expense=支出")
     p_add.add_argument("-c", "--category", default=DEFAULT_CATEGORY, help=f"分类，默认 {DEFAULT_CATEGORY}")
     p_add.add_argument("-n", "--note", default="", help="备注（可选）")
     p_add.add_argument(
@@ -279,14 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_add.set_defaults(func=cmd_add)
 
-    # list
     p_list = sub.add_parser("list", help="查看记录（默认日期倒序，支持筛选）")
     p_list.add_argument("--from", dest="start_date", type=parse_date, default=None, help="起始日期 YYYY-MM-DD（含）")
     p_list.add_argument("--to", dest="end_date", type=parse_date, default=None, help="结束日期 YYYY-MM-DD（含）")
     p_list.add_argument("-c", "--category", default=None, help="按分类精确筛选")
     p_list.set_defaults(func=cmd_list)
 
-    # summary
     p_sum = sub.add_parser("summary", help="月度汇总")
     p_sum.add_argument(
         "-m", "--month",
@@ -302,6 +346,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.file is None:
+        args.file = resolve_default_db_path()
+    args.file = Path(args.file).expanduser()
     return args.func(args)
 
 

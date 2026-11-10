@@ -1,166 +1,112 @@
 # 简易个人记账 CLI（bookkeeping）
 
-一个零依赖的 Python 命令行记账工具，使用本地 JSON 文件持久化记录。
+一个零依赖的 Python 命令行记账工具，使用本地 JSON 文件持久化记录，适合在终端快速记录日常收支。
 
 ## 环境要求
 
-- Python 3.8+（仅使用标准库，无需 pip 安装依赖）
+- Python 3.8+（仅使用标准库，无需 pip 安装第三方依赖）
 
 ## 快速开始
 
 ```bash
-# 直接运行（脚本已带可执行权限）
 python3 bookkeeping/bookkeeping.py --help
+```
 
-# 或添加可执行权限后直接运行
+如需直接执行，可先赋予脚本可执行权限：
+
+```bash
 chmod +x bookkeeping/bookkeeping.py
 ./bookkeeping/bookkeeping.py --help
 ```
 
-默认数据文件：`~/.bookkeeping.json`。可通过 `--file` 参数或环境变量 `BOOKKEEPING_FILE` 指定其他路径（下面示例用临时文件演示，避免污染真实账本）。
+默认数据文件：`~/.bookkeeping.json`。
+可通过全局参数 `--file <path>` 或环境变量 `BOOKKEEPING_FILE` 指定其他数据文件路径，方便测试或维护多个账本。
 
 ## 命令一览
 
-| 命令      | 说明                                     |
-| --------- | ---------------------------------------- |
-| `add`     | 记一笔收入/支出                          |
-| `list`    | 按日期/分类筛选记录（默认日期倒序）      |
-| `summary` | 月度汇总（总收入、总支出、结余、分类占比）|
+| 命令 | 说明 |
+| --- | --- |
+| `add` | 添加一笔收入或支出记录 |
+| `list` | 查询记录，支持按时间范围、分类筛选，并展示合计统计 |
+| `summary` | 查看月度总收入、总支出、结余及支出分类占比 |
 
-### add —— 记一笔
-
-必填：`amount`（正数）、`type`（`income`/`expense`）。
-可选：`-c/--category`（默认 `other`）、`-n/--note`、`-d/--date`（默认当天，格式 `YYYY-MM-DD`）。
-
-### list —— 查看记录
-
-- 默认按日期倒序展示所有记录；
-- `--from YYYY-MM-DD` / `--to YYYY-MM-DD` 按日期范围筛选（含边界）；
-- `-c/--category <name>` 按分类精确筛选；
-- 展示字段：date / type / amount（收入前缀 `+`、支出前缀 `-`）/ category / note，并附带合计。
-
-### summary —— 月度汇总
-
-- `-m/--month YYYY-MM` 指定月份，默认当前月；
-- 输出总收入、总支出、结余；
-- 按支出分类聚合金额与占比（百分比），并附简易可视化条。
-
-## 输入校验
-
-- 金额必须为正数（`> 0`），最多保留 2 位小数；
-- 日期必须为 `YYYY-MM-DD`，月份必须为 `YYYY-MM`；
-- 类型只能是 `income` 或 `expense`；
-- JSON 文件损坏或格式错误时会给出明确提示，不会静默覆盖。
-
-## 示例运行（以下输出为真实执行结果）
-
-示例中通过 `--file /tmp/demo-book.json` 使用独立的临时数据文件，避免影响真实账本。
-
-### 1) 记录若干笔收支
+### 1. add：记录收支
 
 ```bash
-$ BK=/tmp/demo-book.json
-$ rm -f $BK
-
-$ python3 bookkeeping/bookkeeping.py --file $BK add 8000 income -c salary -n "10月工资" -d 2026-10-10
-已记录一笔：
-  日期：2026-10-10  类型：income  金额：+8000.00
-  分类：salary  备注：10月工资
-  存储：/tmp/demo-book.json  累计记录数：1
-
-$ python3 bookkeeping/bookkeeping.py --file $BK add 35 expense -c food -n "午饭" -d 2026-10-10
-已记录一笔：
-  日期：2026-10-10  类型：expense  金额：-35.00
-  分类：food  备注：午饭
-  存储：/tmp/demo-book.json  累计记录数：2
-
-$ python3 bookkeeping/bookkeeping.py --file $BK add 1200 expense -c rent -n "房租" -d 2026-10-01
-已记录一笔：
-  日期：2026-10-01  类型：expense  金额：-1200.00
-  分类：rent  备注：房租
-  存储：/tmp/demo-book.json  累计记录数：3
-
-$ python3 bookkeeping/bookkeeping.py --file $BK add 89.9 expense -c food -n "聚餐" -d 2026-10-15
-已记录一笔：
-  日期：2026-10-15  类型：expense  金额：-89.90
-  分类：food  备注：聚餐
-  存储：/tmp/demo-book.json  累计记录数：4
-
-$ python3 bookkeeping/bookkeeping.py --file $BK add 45 expense -c transport -n "打车" -d 2026-10-12
-已记录一笔：
-  日期：2026-10-12  类型：expense  金额：-45.00
-  分类：transport  备注：打车
-  存储：/tmp/demo-book.json  累计记录数：5
+python3 bookkeeping/bookkeeping.py add <amount> {income,expense} [-c category] [-n note] [-d YYYY-MM-DD]
 ```
 
-### 2) 查看全部记录（默认按日期倒序）
+参数说明：
+- `amount`：必填，正数金额，最多保留两位小数
+- `type`：必填，`income` 表示收入，`expense` 表示支出
+- `-c, --category`：可选，分类，默认 `other`
+- `-n, --note`：可选，备注
+- `-d, --date`：可选，日期，格式 `YYYY-MM-DD`，默认当天
+
+示例：
 
 ```bash
-$ python3 bookkeeping/bookkeeping.py --file $BK list
-date        type            amount  category      note
-------------------------------------------------------------------------
-2026-10-15  expense         -89.90  food          聚餐
-2026-10-12  expense         -45.00  transport     打车
-2026-10-10  income        +8000.00  salary        10月工资
-2026-10-10  expense         -35.00  food          午饭
-2026-10-01  expense       -1200.00  rent          房租
-------------------------------------------------------------------------
-共 5 条  |  收入合计: +8000.00  |  支出合计: -1369.90  |  结余: +6630.10
+python3 bookkeeping/bookkeeping.py add 35 expense -c food -n "午饭" -d 2026-11-10
+python3 bookkeeping/bookkeeping.py add 8000 income -c salary -n "11月工资"
 ```
 
-### 3) 按日期范围 + 分类筛选
+成功后会输出记录详情、存储路径和当前累计记录数。
+
+### 2. list：查询记录与统计
 
 ```bash
-$ python3 bookkeeping/bookkeeping.py --file $BK list --from 2026-10-08 --to 2026-10-12 -c food
-date        type            amount  category      note
-------------------------------------------------------------------------
-2026-10-10  expense         -35.00  food          午饭
-------------------------------------------------------------------------
-共 1 条  |  收入合计: +0.00  |  支出合计: -35.00  |  结余: -35.00
+python3 bookkeeping/bookkeeping.py list [--from YYYY-MM-DD] [--to YYYY-MM-DD] [-c category]
 ```
 
-### 4) 月度汇总（按分类展示支出占比）
+- 默认展示全部记录，按日期倒序输出
+- `--from` / `--to`：按日期闭区间筛选
+- `-c, --category`：按分类精确匹配
+- 输出包含：日期、类型、金额（收入 `+`、支出 `-`）、分类、备注
+- 结果末尾展示：记录数、收入合计、支出合计、结余
+
+示例：
 
 ```bash
-$ python3 bookkeeping/bookkeeping.py --file $BK summary -m 2026-10
-2026-10 月度汇总
-  总收入：+8000.00
-  总支出：-1369.90
-  结  余：+6630.10
-
-支出分类占比：
-  rent          1200.00   87.6%  ############################################
-  food           124.90    9.1%  #####
-  transport       45.00    3.3%  ##
+python3 bookkeeping/bookkeeping.py list
+python3 bookkeeping/bookkeeping.py list --from 2026-11-01 --to 2026-11-30 -c food
 ```
 
-### 5) 错误输入提示
+当没有符合条件的记录时，会输出“暂无符合条件的记录”的提示。
+
+### 3. summary：月度汇总
 
 ```bash
-$ python3 bookkeeping/bookkeeping.py --file $BK add -100 expense
-usage: bookkeeping add [-h] [-c CATEGORY] [-n NOTE] [-d DATE]
-                       amount {income,expense}
-bookkeeping add: error: argument amount: 金额必须为正数，收到：-100
-
-$ python3 bookkeeping/bookkeeping.py --file $BK add 50 unknown
-usage: bookkeeping add [-h] [-c CATEGORY] [-n NOTE] [-d DATE]
-                       amount {income,expense}
-bookkeeping add: error: argument type: invalid choice: 'unknown' (choose from 'income', 'expense')
-
-$ python3 bookkeeping/bookkeeping.py --file $BK add 50 expense -d 2026/10/10
-usage: bookkeeping add [-h] [-c CATEGORY] [-n NOTE] [-d DATE]
-                       amount {income,expense}
-bookkeeping add: error: argument -d/--date: 日期格式错误，应为 YYYY-MM-DD，收到：2026/10/10
+python3 bookkeeping/bookkeeping.py summary [-m YYYY-MM]
 ```
 
-## 数据文件格式
+- 默认统计当前月份
+- `-m, --month`：指定统计月份，格式 `YYYY-MM`
+- 输出包含：总收入、总支出、结余
+- 若当月有支出，还会按支出分类展示金额、占比和简易条形图
 
-`~/.bookkeeping.json` 为 JSON 数组，每条记录结构如下：
+示例：
+
+```bash
+python3 bookkeeping/bookkeeping.py summary -m 2026-11
+```
+
+## 错误提示与可靠性
+
+- 金额必须为正数，日期必须为 `YYYY-MM-DD`，月份必须为 `YYYY-MM`，类型仅支持 `income/expense`
+- 参数错误时会直接指出错误字段和正确格式
+- 数据文件不存在时首次写入会自动创建
+- 写入采用临时文件 + 原子替换策略，尽量避免异常中断导致文件损坏
+- 数据文件 JSON 损坏、顶层结构错误或单条记录字段非法时，会明确报错并停止，不会静默覆盖已有数据
+- 用户中断命令时会以非零状态退出
+
+## 数据格式
+
+数据文件为 JSON 数组，每条记录结构如下：
 
 ```json
 [
   {
-    "date": "2026-10-10",
+    "date": "2026-11-10",
     "type": "expense",
     "amount": 35.0,
     "category": "food",
@@ -169,4 +115,21 @@ bookkeeping add: error: argument -d/--date: 日期格式错误，应为 YYYY-MM-
 ]
 ```
 
-写入采用“临时文件 + 原子替换”策略，避免中途异常造成数据损坏。
+## 本地验证
+
+仓库附带基础测试脚本，可快速验证核心功能：
+
+```bash
+python3 bookkeeping/test_bookkeeping.py
+```
+
+建议使用临时文件进行体验，避免污染真实账本：
+
+```bash
+BK=/tmp/demo-book.json
+rm -f $BK
+python3 bookkeeping/bookkeeping.py --file $BK add 8000 income -c salary -n "工资" -d 2026-10-10
+python3 bookkeeping/bookkeeping.py --file $BK add 35 expense -c food -n "午饭" -d 2026-10-10
+python3 bookkeeping/bookkeeping.py --file $BK list
+python3 bookkeeping/bookkeeping.py --file $BK summary -m 2026-10
+```
